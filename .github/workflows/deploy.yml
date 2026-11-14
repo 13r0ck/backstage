@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-nix
-      - run: nix develop --command sh scripts/deploy.sh deploy "$BRANCH"
+      - run: nix develop .#ci --command backstage deploy "$BRANCH"
 
   cleanup:
     if: github.event.action == 'closed'
@@ -30,4 +30,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-nix
-      - run: nix develop --command sh scripts/deploy.sh delete "$BRANCH"
+      - run: nix develop .#ci --command backstage delete "$BRANCH"

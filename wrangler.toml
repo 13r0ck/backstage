@@ -1,5 +1,6 @@
 name = "backstage"
 main = "site/worker.js"
 compatibility_date = "2024-11-01"
-# Serve at <name>.regal.workers.dev (see scripts/deploy.sh for naming).
+# Used by `wrangler dev`. Deploys go through tools/backstage, which names the
+# Worker per branch (<name>.regal.workers.dev) and reads compatibility_date here.
 workers_dev = true

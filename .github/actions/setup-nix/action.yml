@@ -8,8 +8,10 @@ runs:
     # installer takes a few seconds and enables flakes by default.
     - uses: cachix/install-nix-action@v31
     # Saves/restores /nix/store through the regular GitHub Actions cache,
-    # so the dev shell (idris2, node, wrangler) isn't re-downloaded each run.
+    # so the CI shell (idris2, our libraries, backstage) isn't rebuilt each run.
+    # The key covers every flake input, so a changed library or tool saves a
+    # fresh cache instead of rebuilding it on every later run.
     - uses: nix-community/cache-nix-action@v6
       with:
-        primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+        primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', '**/*.ipkg', '**/*.idr', 'tools/**') }}
         restore-prefixes-first-match: nix-${{ runner.os }}-
