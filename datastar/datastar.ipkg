@@ -1,0 +1,7 @@
+package datastar
+version = 0.1.0
+brief = "Typed Datastar (data-star.dev) HTML, signals and SSE events"
+
+sourcedir = "src"
+modules = Datastar, Datastar.Html, Datastar.Json, Datastar.SSE
+depends = base

@@ -1,0 +1,7 @@
+package cloudflare-workers
+version = 0.1.0
+brief = "Typed Cloudflare Workers handlers for Idris2's JavaScript backend"
+
+sourcedir = "src"
+modules = Cloudflare.Workers
+depends = base

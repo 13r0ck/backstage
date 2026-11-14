@@ -1,0 +1,7 @@
+package site
+
+sourcedir = "src"
+main = Main
+executable = "site.js"
+opts = "--cg javascript"
+depends = base, cloudflare-workers, datastar, cloudflare-workers-datastar

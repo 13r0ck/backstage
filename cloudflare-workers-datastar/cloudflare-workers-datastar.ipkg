@@ -1,0 +1,7 @@
+package cloudflare-workers-datastar
+version = 0.1.0
+brief = "Serve Datastar events and read Datastar signals from Cloudflare Workers"
+
+sourcedir = "src"
+modules = Cloudflare.Workers.Datastar
+depends = base, cloudflare-workers, datastar
