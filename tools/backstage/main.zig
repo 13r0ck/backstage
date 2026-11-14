@@ -26,12 +26,11 @@ const usage =
     \\
 ;
 
-/// The Worker's ES modules: `main_module` imports the compiled Idris output.
+/// The Worker's ES modules, named by their path under site/ so the imports
+/// in worker.js resolve the same way on Cloudflare as they do locally.
+const site_dir = "site/";
 const main_module = "worker.js";
-const modules = [_]struct { name: []const u8, path: []const u8 }{
-    .{ .name = main_module, .path = "site/worker.js" },
-    .{ .name = "site.js", .path = "site/build/exec/site.js" },
-};
+const modules = [_][]const u8{ main_module, "build/exec/site.js" };
 
 const default_api = "https://api.cloudflare.com/client/v4";
 
@@ -132,11 +131,12 @@ const Cloudflare = struct {
         , .{ main_module, try compatibilityDate(cf.arena, cf.io) });
         try appendPart(cf.arena, &body, boundary, "metadata", null, "application/json", metadata);
 
-        for (modules) |m| {
-            const source = std.Io.Dir.cwd().readFileAlloc(cf.io, m.path, cf.arena, .unlimited) catch |err|
-                fail("could not read {s}: {t}\n", .{ m.path, err });
-            if (std.mem.find(u8, source, boundary) != null) fail("{s} contains the multipart boundary\n", .{m.path});
-            try appendPart(cf.arena, &body, boundary, m.name, m.name, "application/javascript+module", source);
+        inline for (modules) |name_| {
+            const path = site_dir ++ name_;
+            const source = std.Io.Dir.cwd().readFileAlloc(cf.io, path, cf.arena, .unlimited) catch |err|
+                fail("could not read {s}: {t}\n", .{ path, err });
+            if (std.mem.find(u8, source, boundary) != null) fail("{s} contains the multipart boundary\n", .{path});
+            try appendPart(cf.arena, &body, boundary, name_, name_, "application/javascript+module", source);
         }
         try body.appendSlice(cf.arena, "--" ++ boundary ++ "--\r\n");
 
