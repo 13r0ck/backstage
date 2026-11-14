@@ -4,10 +4,17 @@
 //!   backstage dev              build, then run `wrangler dev` (dev shell only)
 //!   backstage deploy <branch>  build and upload the branch's Worker
 //!   backstage delete <branch>  delete a preview Worker
+//!   backstage pre-push         Git pre-push hook: deploy pushed dev branches
+//!                              from this machine (see .githooks/pre-push)
+//!
+//! Production and previews live in separate Cloudflare accounts; whichever
+//! account CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID point at is deployed to.
+//! CI uses the production account for `main` and the dev account otherwise;
+//! developer machines only hold the dev account's token.
 //!
 //! Worker names, served at <name>.<account subdomain>.workers.dev:
-//!   main          -> backstage
-//!   other branch  -> <slug>-backstage
+//!   main          -> backstage   (production account: backstage.regal.workers.dev)
+//!   other branch  -> <slug>      (dev account: <slug>.jumble-bust-nugget.workers.dev)
 //!
 //! Run from the repository root. Deploy and delete read CLOUDFLARE_API_TOKEN
 //! and CLOUDFLARE_ACCOUNT_ID from the environment. BACKSTAGE_API_URL
@@ -23,6 +30,7 @@ const usage =
     \\       backstage dev
     \\       backstage deploy <branch>
     \\       backstage delete <branch>
+    \\       backstage pre-push   (reads git's pre-push input on stdin)
     \\
 ;
 
@@ -43,26 +51,124 @@ pub fn main(init: std.process.Init) !void {
     const command = args[1];
 
     if (std.mem.eql(u8, command, "build")) {
-        try build(io);
+        try build(arena, io);
     } else if (std.mem.eql(u8, command, "dev")) {
-        try build(io);
+        try build(arena, io);
         try run(io, &.{ "wrangler", "dev" }, .inherit);
     } else if (std.mem.eql(u8, command, "deploy") or std.mem.eql(u8, command, "delete")) {
         if (args.len != 3) fail(usage, .{});
         const name = try workerName(arena, args[2]);
-        var cf = try Cloudflare.init(arena, io, init.environ_map);
+        const env = init.environ_map;
+        var cf = try Cloudflare.init(
+            arena,
+            io,
+            env,
+            env.get("CLOUDFLARE_API_TOKEN") orelse fail("CLOUDFLARE_API_TOKEN is not set\n", .{}),
+            env.get("CLOUDFLARE_ACCOUNT_ID") orelse fail("CLOUDFLARE_ACCOUNT_ID is not set\n", .{}),
+        );
         if (std.mem.eql(u8, command, "deploy")) {
-            try build(io);
+            try build(arena, io);
             try cf.deploy(name);
             std.debug.print("deployed {s}\n", .{name});
         } else {
-            if (std.mem.eql(u8, name, "backstage")) fail("refusing to delete production\n", .{});
+            if (isProduction(name)) fail("refusing to delete production\n", .{});
             try cf.delete(name);
             std.debug.print("deleted {s}\n", .{name});
         }
+    } else if (std.mem.eql(u8, command, "pre-push")) {
+        try prePush(arena, io, init.environ_map);
     } else {
         fail(usage, .{});
     }
+}
+
+fn isProduction(worker: []const u8) bool {
+    return std.mem.eql(u8, worker, "backstage");
+}
+
+/// Deploys each pushed dev branch from this checkout, before the push is sent.
+/// Git passes one line per ref: `<local ref> <local sha> <remote ref> <remote sha>`.
+/// Only deploys when the working tree is exactly the pushed commit, so what
+/// goes live is what's being pushed. CI deploys the same commit afterwards.
+fn prePush(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) !void {
+    var buffer: [4096]u8 = undefined;
+    var stdin = std.Io.File.stdin().readerStreaming(io, &buffer);
+    const input = try stdin.interface.allocRemaining(arena, .limited(1 << 20));
+
+    const head = std.mem.trim(u8, try git(arena, io, &.{ "git", "rev-parse", "HEAD" }), "\n");
+    const dirty = (try git(arena, io, &.{ "git", "status", "--porcelain", "--untracked-files=no" })).len > 0;
+
+    var lines = std.mem.splitScalar(u8, input, '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = fields.next() orelse continue; // local ref
+        const sha = fields.next() orelse continue;
+        const remote_ref = fields.next() orelse continue;
+        if (!std.mem.startsWith(u8, remote_ref, "refs/heads/")) continue;
+        if (std.mem.allEqual(u8, sha, '0')) continue; // branch deletion
+        const branch = remote_ref["refs/heads/".len..];
+
+        const name = try workerName(arena, branch);
+        if (isProduction(name)) {
+            std.debug.print("backstage: {s} deploys from CI after the push\n", .{branch});
+            continue;
+        }
+        if (!std.mem.eql(u8, sha, head) or dirty) {
+            std.debug.print("backstage: not deploying {s} locally: the working tree isn't the pushed commit; CI will deploy it\n", .{branch});
+            continue;
+        }
+        // Only the dev account's credentials, never CLOUDFLARE_API_TOKEN, so a
+        // production token in the shell can't be used by a push.
+        const token = try devSetting(arena, io, env, "CLOUDFLARE_DEV_API_TOKEN");
+        const account = try devSetting(arena, io, env, "CLOUDFLARE_DEV_ACCOUNT_ID");
+        if (token == null or account == null) {
+            std.debug.print("backstage: put CLOUDFLARE_DEV_API_TOKEN and CLOUDFLARE_DEV_ACCOUNT_ID in .env to deploy previews on push; CI will deploy {s}\n", .{branch});
+            return;
+        }
+
+        var cf = try Cloudflare.init(arena, io, env, token.?, account.?);
+        cf.commit = sha;
+        try buildFor(arena, io, sha);
+        try cf.deploy(name);
+        std.debug.print("backstage: deployed {s} from this machine\n", .{name});
+    }
+}
+
+/// A dev-account setting from the environment, else from the first env file
+/// that exists: the repo's gitignored .env, then ~/.config/backstage/.env
+/// (`KEY=value` lines; `#` comments; optional `export` and quotes).
+fn devSetting(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, key: []const u8) !?[]const u8 {
+    if (env.get(key)) |v| return v;
+    const home_env = if (env.get("HOME")) |home| try std.fmt.allocPrint(arena, "{s}/.config/backstage/.env", .{home}) else null;
+    for ([_]?[]const u8{ ".env", home_env }) |candidate| {
+        const path = candidate orelse continue;
+        const file = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(64 * 1024)) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => fail("could not read {s}: {t}\n", .{ path, err }),
+        };
+        return lookupEnvFile(file, key);
+    }
+    return null;
+}
+
+fn lookupEnvFile(file: []const u8, key: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, file, '\n');
+    while (lines.next()) |raw| {
+        var line = std.mem.trim(u8, raw, " \t\r");
+        if (std.mem.startsWith(u8, line, "export ")) line = line["export ".len..];
+        const eq = std.mem.findScalar(u8, line, '=') orelse continue;
+        if (!std.mem.eql(u8, std.mem.trim(u8, line[0..eq], " \t"), key)) continue;
+        return std.mem.trim(u8, std.mem.trim(u8, line[eq + 1 ..], " \t"), "\"'");
+    }
+    return null;
+}
+
+/// Runs a git command and returns its stdout.
+fn git(arena: std.mem.Allocator, io: std.Io, argv: []const []const u8) ![]const u8 {
+    const result = std.process.run(arena, io, .{ .argv = argv }) catch |err|
+        fail("could not run git: {t}\n", .{err});
+    if (!result.term.success()) fail("{s} failed: {s}\n", .{ argv[1], result.stderr });
+    return result.stdout;
 }
 
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {
@@ -70,8 +176,38 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
-fn build(io: std.Io) !void {
+/// Records which commit site.js was built from, when the build ran on a clean
+/// checkout. pre-push skips compiling if it matches the pushed commit, so a
+/// build done right after committing (.githooks/post-commit) makes the push
+/// upload-only.
+const build_stamp = "site/build/exec/site.commit";
+
+fn build(arena: std.mem.Allocator, io: std.Io) !void {
+    const cwd = std.Io.Dir.cwd();
+    cwd.deleteFile(io, build_stamp) catch {};
+    const before = try cleanHead(arena, io);
     try run(io, &.{ "idris2", "--build", "site.ipkg" }, .{ .path = "site" });
+    const commit = before orelse return;
+    const after = try cleanHead(arena, io) orelse return;
+    if (!std.mem.eql(u8, commit, after)) return; // checkout changed mid-build
+    cwd.writeFile(io, .{ .sub_path = build_stamp, .data = commit }) catch {};
+}
+
+/// Builds unless site.js is already a clean build of `commit`.
+fn buildFor(arena: std.mem.Allocator, io: std.Io, commit: []const u8) !void {
+    const stamp = std.Io.Dir.cwd().readFileAlloc(io, build_stamp, arena, .limited(64)) catch "";
+    if (std.mem.eql(u8, stamp, commit)) return;
+    try build(arena, io);
+}
+
+/// HEAD's commit, or null when tracked files have uncommitted changes (or
+/// this isn't a git checkout).
+fn cleanHead(arena: std.mem.Allocator, io: std.Io) !?[]const u8 {
+    const status = std.process.run(arena, io, .{ .argv = &.{ "git", "status", "--porcelain", "--untracked-files=no" } }) catch return null;
+    if (!status.term.success() or status.stdout.len > 0) return null;
+    const head = std.process.run(arena, io, .{ .argv = &.{ "git", "rev-parse", "HEAD" } }) catch return null;
+    if (!head.term.success()) return null;
+    return std.mem.trim(u8, head.stdout, "\n");
 }
 
 fn run(io: std.Io, argv: []const []const u8, cwd: std.process.Child.Cwd) !void {
@@ -81,7 +217,7 @@ fn run(io: std.Io, argv: []const []const u8, cwd: std.process.Child.Cwd) !void {
     if (!term.success()) fail("{s} failed\n", .{argv[0]});
 }
 
-/// `main` is production; any other branch becomes a DNS-safe `<slug>-backstage`.
+/// `main` is production; any other branch becomes a DNS-safe `<slug>`.
 fn workerName(arena: std.mem.Allocator, branch: []const u8) ![]const u8 {
     if (std.mem.eql(u8, branch, "main")) return "backstage";
 
@@ -94,10 +230,10 @@ fn workerName(arena: std.mem.Allocator, branch: []const u8) ![]const u8 {
             try slug.append(arena, '-');
         }
     }
-    // 53 characters keeps the name within the 63-character DNS label limit.
-    const trimmed = std.mem.trim(u8, slug.items[0..@min(slug.items.len, 53)], "-");
+    // The Worker name is the subdomain label, limited to 63 characters.
+    const trimmed = std.mem.trim(u8, slug.items[0..@min(slug.items.len, 63)], "-");
     if (trimmed.len == 0) fail("branch '{s}' has no usable characters\n", .{branch});
-    return std.fmt.allocPrint(arena, "{s}-backstage", .{trimmed});
+    return trimmed;
 }
 
 const Cloudflare = struct {
@@ -107,10 +243,10 @@ const Cloudflare = struct {
     api: []const u8,
     account: []const u8,
     auth: []const u8,
+    /// Bound as the Worker's COMMIT text binding; worker.js serves it as `x-commit`.
+    commit: []const u8,
 
-    fn init(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) !Cloudflare {
-        const token = env.get("CLOUDFLARE_API_TOKEN") orelse fail("CLOUDFLARE_API_TOKEN is not set\n", .{});
-        const account = env.get("CLOUDFLARE_ACCOUNT_ID") orelse fail("CLOUDFLARE_ACCOUNT_ID is not set\n", .{});
+    fn init(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, token: []const u8, account: []const u8) !Cloudflare {
         return .{
             .arena = arena,
             .io = io,
@@ -118,6 +254,11 @@ const Cloudflare = struct {
             .api = env.get("BACKSTAGE_API_URL") orelse default_api,
             .account = account,
             .auth = try std.fmt.allocPrint(arena, "Bearer {s}", .{token}),
+            .commit = commit: {
+                const c = env.get("BACKSTAGE_COMMIT") orelse break :commit "unknown";
+                for (c) |ch| if (!std.ascii.isAlphanumeric(ch)) fail("BACKSTAGE_COMMIT must be alphanumeric\n", .{});
+                break :commit c;
+            },
         };
     }
 
@@ -127,8 +268,8 @@ const Cloudflare = struct {
         var body: std.ArrayList(u8) = .empty;
 
         const metadata = try std.fmt.allocPrint(cf.arena,
-            \\{{"main_module":"{s}","compatibility_date":"{s}"}}
-        , .{ main_module, try compatibilityDate(cf.arena, cf.io) });
+            \\{{"main_module":"{s}","compatibility_date":"{s}","bindings":[{{"type":"plain_text","name":"COMMIT","text":"{s}"}}]}}
+        , .{ main_module, try compatibilityDate(cf.arena, cf.io), cf.commit });
         try appendPart(cf.arena, &body, boundary, "metadata", null, "application/json", metadata);
 
         inline for (modules) |name_| {
@@ -140,8 +281,16 @@ const Cloudflare = struct {
         }
         try body.appendSlice(cf.arena, "--" ++ boundary ++ "--\r\n");
 
-        _ = try cf.call(.PUT, name, "", "multipart/form-data; boundary=" ++ boundary, body.items);
-        _ = try cf.call(.POST, name, "/subdomain", "application/json", "{\"enabled\":true}");
+        const uploaded = try cf.call(.PUT, name, "", "multipart/form-data; boundary=" ++ boundary, body.items);
+
+        // workers.dev stays enabled once set, so only a newly created Worker
+        // (created_on == modified_on) needs the extra round trip.
+        const Upload = struct { result: struct { created_on: []const u8, modified_on: []const u8 } };
+        const created = if (std.json.parseFromSliceLeaky(Upload, cf.arena, uploaded, .{ .ignore_unknown_fields = true })) |u|
+            std.mem.eql(u8, u.result.created_on, u.result.modified_on)
+        else |_|
+            true; // unexpected response shape: enable to be safe
+        if (created) _ = try cf.call(.POST, name, "/subdomain", "application/json", "{\"enabled\":true}");
     }
 
     fn delete(cf: *Cloudflare, name: []const u8) !void {
@@ -216,6 +365,6 @@ test workerName {
     defer arena.deinit();
     const a = arena.allocator();
     try std.testing.expectEqualStrings("backstage", try workerName(a, "main"));
-    try std.testing.expectEqualStrings("feature-add-login-backstage", try workerName(a, "Feature/Add_Login"));
-    try std.testing.expectEqualStrings("weird-branch-backstage", try workerName(a, "-weird--Branch-"));
+    try std.testing.expectEqualStrings("feature-add-login", try workerName(a, "Feature/Add_Login"));
+    try std.testing.expectEqualStrings("weird-branch", try workerName(a, "-weird--Branch-"));
 }

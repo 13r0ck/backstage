@@ -1,3 +1,5 @@
 build/
+# Local dev-account credentials for the pre-push hook (see .githooks/pre-push).
+.env
 .wrangler/
 result

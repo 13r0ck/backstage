@@ -1,0 +1,53 @@
+name: CI tools
+description: >
+  Put idris2 (with our libraries) and backstage on PATH without installing Nix,
+  by restoring the flake's ci-tools closure from the GitHub Actions cache into
+  /nix/store. Only on a cache miss (the libraries, the tool or the flake lock
+  changed) is Nix installed to build it and save a new cache entry.
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare /nix
+      shell: bash
+      run: sudo mkdir -p /nix && sudo chown "$USER" /nix
+
+    - id: restore
+      uses: actions/cache/restore@v4
+      with:
+        # /nix/ci-tools is a symlink to the ci-tools store path.
+        path: |
+          /nix/store
+          /nix/ci-tools
+        key: ci-tools-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'cloudflare-workers/**', 'datastar/**', 'cloudflare-workers-datastar/**', 'tools/**') }}
+
+    # Cache miss only: install Nix (it wants to create /nix itself) and build.
+    - if: steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: sudo rmdir /nix
+
+    - if: steps.restore.outputs.cache-hit != 'true'
+      uses: cachix/install-nix-action@v31
+
+    - if: steps.restore.outputs.cache-hit != 'true'
+      name: Build ci-tools
+      shell: bash
+      run: |
+        out=$(nix build .#ci-tools --no-link --print-out-paths)
+        sudo ln -sfn "$out" /nix/ci-tools
+        # Keep only ci-tools' closure in /nix/store, so the cache holds just
+        # that (~37 MB compressed), not Nix, nixpkgs and build inputs.
+        nix-store -qR "$out" > /tmp/keep
+        find /nix/store -mindepth 1 -maxdepth 1 | grep -vxFf /tmp/keep | sudo xargs rm -rf
+
+    - if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          /nix/store
+          /nix/ci-tools
+        key: ${{ steps.restore.outputs.cache-primary-key }}
+
+    - name: Add to PATH
+      shell: bash
+      run: echo /nix/ci-tools/bin >> "$GITHUB_PATH"

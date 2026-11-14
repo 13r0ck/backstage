@@ -1,0 +1,11 @@
+#!/bin/sh
+# Deploys pushed dev branches from this machine (backstage pre-push) to the
+# dev Cloudflare account, so previews go live without waiting for CI. Reads
+# CLOUDFLARE_DEV_API_TOKEN / CLOUDFLARE_DEV_ACCOUNT_ID from the environment or
+# the gitignored .env or ~/.config/backstage/.env; production credentials are
+# never used. Never blocks the
+# push: if the
+# local deploy can't run or fails, CI deploys the branch as usual.
+# Enabled by `nix develop` (git config core.hooksPath .githooks).
+command -v backstage >/dev/null || exit 0
+backstage pre-push || echo "backstage: local deploy failed; CI will deploy" >&2
