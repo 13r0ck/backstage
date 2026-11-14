@@ -1,7 +1,7 @@
 name: Deploy to Cloudflare Workers
 
-# main          -> https://$BASE_DOMAIN
-# PR branch X   -> https://<slug of X>.$BASE_DOMAIN, deleted when the PR closes
+# main          -> https://backstage.regal.workers.dev
+# PR branch X   -> https://<slug of X>-backstage.regal.workers.dev, deleted when the PR closes
 on:
   push:
     branches: [main]
@@ -9,7 +9,6 @@ on:
     types: [opened, synchronize, reopened, closed]
 
 env:
-  BASE_DOMAIN: ${{ vars.BASE_DOMAIN }}
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   BRANCH: ${{ github.head_ref || github.ref_name }}

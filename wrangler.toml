@@ -1,3 +1,5 @@
 name = "backstage"
 main = "worker/index.js"
 compatibility_date = "2024-11-01"
+# Serve at <name>.regal.workers.dev (see scripts/deploy.sh for naming).
+workers_dev = true
