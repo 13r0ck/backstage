@@ -48,9 +48,28 @@
             export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig-cache ZIG_LOCAL_CACHE_DIR=$TMPDIR/zig-cache
             zig test main.zig
             mkdir -p $out/bin
-            zig build-exe -O ReleaseSmall -femit-bin=$out/bin/backstage main.zig
+            # Baseline CPU: Zig defaults to the build machine's CPU, and this
+            # binary runs elsewhere (cached for other CI runners).
+            zig build-exe -O ReleaseSmall -mcpu=baseline -femit-bin=$out/bin/backstage main.zig
           '';
         };
+
+        # Everything CI needs, with no Nix required to run it: an idris2 that
+        # already finds our libraries, plus backstage. CI restores this
+        # package's closure from the GitHub Actions cache straight into
+        # /nix/store (see .github/actions/tools), skipping Nix entirely.
+        ci-tools = pkgs.runCommand "backstage-ci-tools" { nativeBuildInputs = [ pkgs.makeBinaryWrapper ]; } ''
+          mkdir -p $out/bin
+          makeBinaryWrapper ${pkgs.idris2}/bin/idris2 $out/bin/idris2 \
+            --prefix IDRIS2_PACKAGE_PATH : ${
+              pkgs.lib.makeSearchPath "lib/idris2-${pkgs.idris2.version}" [
+                cloudflare-workers.library'
+                datastar.library'
+                cloudflare-workers-datastar.library'
+              ]
+            }
+          ln -s ${backstage}/bin/backstage $out/bin/backstage
+        '';
       in
       {
         # Idris2 libraries, for other flakes to use as `idrisLibraries`.
@@ -59,7 +78,7 @@
           datastar = datastar.library';
           cloudflare-workers-datastar = cloudflare-workers-datastar.library';
           site = site.executable;
-          inherit backstage;
+          inherit backstage ci-tools;
           default = site.executable;
         };
 
@@ -71,11 +90,10 @@
           default = pkgs.mkShell {
             inputsFrom = [ site.executable.withSource ];
             packages = [ pkgs.idris2 backstage pkgs.wrangler ];
-          };
-          # CI: just the compiler, the libraries and backstage.
-          ci = pkgs.mkShell {
-            inputsFrom = [ site.executable ];
-            packages = [ pkgs.idris2 backstage ];
+            # Dev branches deploy from this machine on push (.githooks/pre-push).
+            shellHook = ''
+              git config core.hooksPath .githooks
+            '';
           };
         };
       });

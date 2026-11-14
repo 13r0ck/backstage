@@ -1,0 +1,5 @@
+#!/bin/sh
+# Builds the site in the background right after each commit, so the next
+# push only has to upload (see build_stamp in tools/backstage/main.zig).
+command -v backstage >/dev/null || exit 0
+(backstage build >/dev/null 2>&1 &)
