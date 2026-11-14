@@ -1,17 +1,13 @@
 name: Set up Nix
-description: Install Nix and restore the /nix/store cache keyed on the flake.
+description: Install Determinate Nix with FlakeHub Cache as a binary cache.
 
+# The calling job needs `permissions: id-token: write` so FlakeHub Cache can
+# authenticate through GitHub's OIDC token; no secrets are involved.
 runs:
   using: composite
   steps:
-    # Hosted runners start clean, so Nix is installed each run; this
-    # installer takes a few seconds and enables flakes by default.
-    - uses: cachix/install-nix-action@v31
-    # Saves/restores /nix/store through the regular GitHub Actions cache,
-    # so the CI shell (idris2, our libraries, backstage) isn't rebuilt each run.
-    # The key covers every flake input, so a changed library or tool saves a
-    # fresh cache instead of rebuilding it on every later run.
-    - uses: nix-community/cache-nix-action@v6
-      with:
-        primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', '**/*.ipkg', '**/*.idr', 'tools/**') }}
-        restore-prefixes-first-match: nix-${{ runner.os }}-
+    # Hosted runners start clean, so Nix is installed each run (a few seconds).
+    - uses: DeterminateSystems/determinate-nix-action@v3
+    # Substitutes anything already built (backstage, the Idris libraries) and
+    # pushes whatever this job builds, so each derivation is built only once.
+    - uses: DeterminateSystems/flakehub-cache-action@main
