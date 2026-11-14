@@ -20,8 +20,7 @@ jobs:
     concurrency: deploy-${{ github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/setup-nix
       - run: nix develop --command sh scripts/deploy.sh deploy "$BRANCH"
 
   cleanup:
@@ -30,6 +29,5 @@ jobs:
     concurrency: deploy-${{ github.head_ref }}
     steps:
       - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/setup-nix
       - run: nix develop --command sh scripts/deploy.sh delete "$BRANCH"
