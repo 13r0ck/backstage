@@ -1,0 +1,7 @@
+package signal
+version = 0.1.0
+brief = "Send a Signal message from a Cloudflare Worker, with libsignal compiled to wasm"
+
+sourcedir = "src"
+modules = Signal.Wasm, Signal.Api
+depends = base, cloudflare-workers, datastar

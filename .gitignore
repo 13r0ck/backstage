@@ -3,3 +3,5 @@ build/
 .env
 .wrangler/
 result
+# Local Signal bot secrets for `wrangler dev` (see SETUP.md).
+.dev.vars
