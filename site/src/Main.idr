@@ -72,10 +72,6 @@ routes env req = case (req.method, req.path) of
                                       events [setSignals [(count, JNumber (fromMaybe 0 (getNumber count ss) + 1))]]
   (POST, ["send"])               => send env
   (GET,  ["signal", "selftest"]) => selftest
-  (GET,  ["fetch-test"])         => do
-                                      let url = fromMaybe "https://example.com" (queryParam "url" req)
-                                      r <- attempt (fetch (get url))
-                                      pure (text (url ++ ": " ++ either id (\r => show r.status ++ " " ++ r.body) r))
   (_,    [])                     => pure methodNotAllowed
   _                              => pure notFound
 

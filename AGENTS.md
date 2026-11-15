@@ -7,6 +7,8 @@ An Idris2 site compiled to JavaScript and served from Cloudflare Workers.
 - `cloudflare-workers/`: Idris2 library with typed Workers requests/responses (`Cloudflare.Workers`).
 - `datastar/`: pure Idris2 library for Datastar: escaped HTML, JSON, signals, SSE events.
 - `cloudflare-workers-datastar/`: glue between the two.
+- `signal-wasm/`: Rust crate wrapping libsignal, compiled to wasm by the flake (`nix build .#signal-wasm`; native tests with `cargo test` in `nix develop`).
+- `signal/`: Idris2 library: bindings to that wasm and the chat.signal.org calls behind the site's "send a Signal message" button. One-time bot setup is in `SETUP.md`.
 - `site/`: the website (`src/Main.idr`); `worker.js` is the Worker entry that loads the compiled `build/exec/site.js`.
 - `tools/backstage/main.zig`: the build/deploy CLI (Zig 0.17; check its std library before using an API, it changed a lot recently).
 - `flake.nix`: builds every package; `nix develop` is the dev environment.

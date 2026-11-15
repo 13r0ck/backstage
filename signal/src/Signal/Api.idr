@@ -32,8 +32,14 @@ config env = do
   target <- getEnv "TARGET_ACI" env
   pure (MkConfig (MkBot aci password (identityKey key) (cast {from = Integer} reg)) target)
 
+||| chat.signal.org, through Signal's Fastly reflector (libsignal's
+||| domain-fronting route). chat.signal.org itself presents a certificate from
+||| Signal's private CA, which Workers' fetch rejects (HTTP 526); the reflector
+||| has a public one. Fastly terminates TLS, so it sees request headers (the
+||| bot's password) and metadata, but message content stays end-to-end
+||| encrypted.
 server : String
-server = "https://chat.signal.org"
+server = "https://reflector-signal.global.ssl.fastly.net/service"
 
 %foreign "javascript:lambda:(s) => btoa(s)"
 prim__btoa : String -> String
