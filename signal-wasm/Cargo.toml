@@ -1,0 +1,31 @@
+[package]
+name = "signal-wasm"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Not on crates.io; pinned by tag (bump together with Cargo.lock).
+libsignal-protocol = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
+# Must match wasm-bindgen-cli in flake.nix.
+wasm-bindgen = "=0.2.130"
+base64 = "0.22"
+# The rand major version libsignal uses.
+rand = { version = "0.9", features = ["os_rng"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Randomness from crypto.getRandomValues.
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

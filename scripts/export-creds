@@ -1,0 +1,36 @@
+#!/bin/sh
+# Prints `wrangler secret put` commands for the Signal bot's secrets, read
+# from signal-cli's data directory (signal-cli 0.14.9; see SETUP.md).
+#
+#   scripts/export-creds +15551234567 <target-aci> [signal-cli data dir]
+#
+# Prints commands, never writes files. Review them, then run them in a
+# terminal; don't redirect them into a file inside the repository.
+set -eu
+
+number=${1:?usage: export-creds <bot number> <target ACI> [signal-cli data dir]}
+target=${2:?usage: export-creds <bot number> <target ACI> [signal-cli data dir]}
+dir=${3:-${XDG_DATA_HOME:-$HOME/.local/share}/signal-cli}
+
+command -v jq >/dev/null || { echo "export-creds needs jq (nix shell nixpkgs#jq)" >&2; exit 1; }
+
+path=$(jq -r --arg n "$number" '.accounts[] | select(.number == $n) | .path' "$dir/data/accounts.json")
+[ -n "$path" ] || { echo "no signal-cli account for $number in $dir" >&2; exit 1; }
+account="$dir/data/$path"
+
+field() {
+  v=$(jq -r --arg k "$1" '.[$k] // empty' "$account")
+  [ -n "$v" ] || { echo "$account has no $1" >&2; exit 1; }
+  printf '%s' "$v"
+}
+
+# One command per secret, the value piped in so it isn't an argument.
+put() {
+  printf "printf '%%s' '%s' | wrangler secret put %s --name \"\${WORKER:-backstage}\"\n" "$2" "$1"
+}
+
+put BOT_ACI "$(field uuid)"
+put BOT_PASSWORD "$(field password)"
+put BOT_IDENTITY_KEY "$(field identityPrivateKey)"
+put BOT_REG_ID "$(field registrationId)"
+put TARGET_ACI "$target"

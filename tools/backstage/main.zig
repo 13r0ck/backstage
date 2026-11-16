@@ -20,6 +20,11 @@
 //! and CLOUDFLARE_ACCOUNT_ID from the environment. BACKSTAGE_API_URL
 //! overrides the API base, for testing against a fake server.
 //!
+//! Build copies the compiled libsignal wasm (the flake's signal-wasm package)
+//! from BACKSTAGE_SIGNAL_WASM into site/build/signal/; the flake's backstage
+//! sets it. Deploys keep the Worker's secrets (the Signal bot's credentials),
+//! which are set with `wrangler secret put`, not here.
+//!
 //! Memory: everything goes into the process arena and is never freed. The
 //! process is short-lived, so exiting is the cleanup.
 
@@ -34,11 +39,22 @@ const usage =
     \\
 ;
 
-/// The Worker's ES modules, named by their path under site/ so the imports
-/// in worker.js resolve the same way on Cloudflare as they do locally.
+/// The Worker's modules, named by their path under site/ so the imports in
+/// worker.js resolve the same way on Cloudflare as they do locally.
 const site_dir = "site/";
 const main_module = "worker.js";
-const modules = [_][]const u8{ main_module, "build/exec/site.js" };
+const Module = struct { name: []const u8, content_type: []const u8 };
+const js = "application/javascript+module";
+const modules = [_]Module{
+    .{ .name = main_module, .content_type = js },
+    .{ .name = "build/exec/site.js", .content_type = js },
+    .{ .name = "build/signal/signal_wasm.js", .content_type = js },
+    .{ .name = "build/signal/signal_wasm_bg.wasm", .content_type = "application/wasm" },
+};
+
+/// signal-wasm's files, copied from BACKSTAGE_SIGNAL_WASM into site/build/signal/.
+const signal_dir = "site/build/signal";
+const signal_files = [_][]const u8{ "signal_wasm.js", "signal_wasm_bg.wasm" };
 
 const default_api = "https://api.cloudflare.com/client/v4";
 
@@ -51,9 +67,9 @@ pub fn main(init: std.process.Init) !void {
     const command = args[1];
 
     if (std.mem.eql(u8, command, "build")) {
-        try build(arena, io);
+        try build(arena, io, init.environ_map);
     } else if (std.mem.eql(u8, command, "dev")) {
-        try build(arena, io);
+        try build(arena, io, init.environ_map);
         try run(io, &.{ "wrangler", "dev" }, .inherit);
     } else if (std.mem.eql(u8, command, "deploy") or std.mem.eql(u8, command, "delete")) {
         if (args.len != 3) fail(usage, .{});
@@ -67,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
             env.get("CLOUDFLARE_ACCOUNT_ID") orelse fail("CLOUDFLARE_ACCOUNT_ID is not set\n", .{}),
         );
         if (std.mem.eql(u8, command, "deploy")) {
-            try build(arena, io);
+            try build(arena, io, env);
             try cf.deploy(name);
             std.debug.print("deployed {s}\n", .{name});
         } else {
@@ -128,7 +144,7 @@ fn prePush(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
 
         var cf = try Cloudflare.init(arena, io, env, token.?, account.?);
         cf.commit = sha;
-        try buildFor(arena, io, sha);
+        try buildFor(arena, io, env, sha);
         try cf.deploy(name);
         std.debug.print("backstage: deployed {s} from this machine\n", .{name});
     }
@@ -182,10 +198,11 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 /// upload-only.
 const build_stamp = "site/build/exec/site.commit";
 
-fn build(arena: std.mem.Allocator, io: std.Io) !void {
+fn build(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) !void {
     const cwd = std.Io.Dir.cwd();
     cwd.deleteFile(io, build_stamp) catch {};
     const before = try cleanHead(arena, io);
+    try copySignalWasm(arena, io, env);
     try run(io, &.{ "idris2", "--build", "site.ipkg" }, .{ .path = "site" });
     const commit = before orelse return;
     const after = try cleanHead(arena, io) orelse return;
@@ -193,11 +210,28 @@ fn build(arena: std.mem.Allocator, io: std.Io) !void {
     cwd.writeFile(io, .{ .sub_path = build_stamp, .data = commit }) catch {};
 }
 
+/// Copies the flake-built signal-wasm into site/build/signal/. Copied rather
+/// than linked, so the files are writable and wrangler sees plain files.
+fn copySignalWasm(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) !void {
+    const from = env.get("BACKSTAGE_SIGNAL_WASM") orelse
+        fail("BACKSTAGE_SIGNAL_WASM is not set; run backstage from `nix develop`\n", .{});
+    const cwd = std.Io.Dir.cwd();
+    cwd.createDirPath(io, signal_dir) catch |err| fail("could not create {s}: {t}\n", .{ signal_dir, err });
+    for (signal_files) |file| {
+        const src = try std.fmt.allocPrint(arena, "{s}/{s}", .{ from, file });
+        const dst = try std.fmt.allocPrint(arena, "{s}/{s}", .{ signal_dir, file });
+        const data = cwd.readFileAlloc(io, src, arena, .unlimited) catch |err|
+            fail("could not read {s}: {t}\n", .{ src, err });
+        cwd.writeFile(io, .{ .sub_path = dst, .data = data }) catch |err|
+            fail("could not write {s}: {t}\n", .{ dst, err });
+    }
+}
+
 /// Builds unless site.js is already a clean build of `commit`.
-fn buildFor(arena: std.mem.Allocator, io: std.Io, commit: []const u8) !void {
+fn buildFor(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, commit: []const u8) !void {
     const stamp = std.Io.Dir.cwd().readFileAlloc(io, build_stamp, arena, .limited(64)) catch "";
     if (std.mem.eql(u8, stamp, commit)) return;
-    try build(arena, io);
+    try build(arena, io, env);
 }
 
 /// HEAD's commit, or null when tracked files have uncommitted changes (or
@@ -264,24 +298,15 @@ const Cloudflare = struct {
 
     /// Uploads the modules as the Worker's new version, then serves it on workers.dev.
     fn deploy(cf: *Cloudflare, name: []const u8) !void {
-        const boundary = "backstage-module-boundary-5f0c2e";
-        var body: std.ArrayList(u8) = .empty;
-
-        const metadata = try std.fmt.allocPrint(cf.arena,
-            \\{{"main_module":"{s}","compatibility_date":"{s}","bindings":[{{"type":"plain_text","name":"COMMIT","text":"{s}"}}]}}
-        , .{ main_module, try compatibilityDate(cf.arena, cf.io), cf.commit });
-        try appendPart(cf.arena, &body, boundary, "metadata", null, "application/json", metadata);
-
-        inline for (modules) |name_| {
-            const path = site_dir ++ name_;
-            const source = std.Io.Dir.cwd().readFileAlloc(cf.io, path, cf.arena, .unlimited) catch |err|
+        var sources: [modules.len][]const u8 = undefined;
+        for (modules, &sources) |m, *source| {
+            const path = try std.fmt.allocPrint(cf.arena, site_dir ++ "{s}", .{m.name});
+            source.* = std.Io.Dir.cwd().readFileAlloc(cf.io, path, cf.arena, .unlimited) catch |err|
                 fail("could not read {s}: {t}\n", .{ path, err });
-            if (std.mem.find(u8, source, boundary) != null) fail("{s} contains the multipart boundary\n", .{path});
-            try appendPart(cf.arena, &body, boundary, name_, name_, "application/javascript+module", source);
         }
-        try body.appendSlice(cf.arena, "--" ++ boundary ++ "--\r\n");
+        const body = try uploadBody(cf.arena, try compatibilityDate(cf.arena, cf.io), cf.commit, &sources);
 
-        const uploaded = try cf.call(.PUT, name, "", "multipart/form-data; boundary=" ++ boundary, body.items);
+        const uploaded = try cf.call(.PUT, name, "", "multipart/form-data; boundary=" ++ upload_boundary, body);
 
         // workers.dev stays enabled once set, so only a newly created Worker
         // (created_on == modified_on) needs the extra round trip.
@@ -325,6 +350,29 @@ const Cloudflare = struct {
     }
 };
 
+const upload_boundary = "backstage-module-boundary-5f0c2e";
+
+/// The multipart body of a script upload: metadata, then `modules` with
+/// `sources` (in the same order).
+///
+/// Uploading replaces the Worker's bindings with the metadata's. `keep_bindings`
+/// keeps its secrets (set separately with `wrangler secret put`) instead of
+/// wiping them on every deploy.
+fn uploadBody(arena: std.mem.Allocator, compatibility_date: []const u8, commit: []const u8, sources: []const []const u8) ![]const u8 {
+    var body: std.ArrayList(u8) = .empty;
+    const metadata = try std.fmt.allocPrint(arena,
+        \\{{"main_module":"{s}","compatibility_date":"{s}","bindings":[{{"type":"plain_text","name":"COMMIT","text":"{s}"}}],"keep_bindings":["secret_text"]}}
+    , .{ main_module, compatibility_date, commit });
+    try appendPart(arena, &body, upload_boundary, "metadata", null, "application/json", metadata);
+
+    for (modules, sources) |m, source| {
+        if (std.mem.find(u8, source, upload_boundary) != null) fail("{s} contains the multipart boundary\n", .{m.name});
+        try appendPart(arena, &body, upload_boundary, m.name, m.name, m.content_type, source);
+    }
+    try body.appendSlice(arena, "--" ++ upload_boundary ++ "--\r\n");
+    return body.items;
+}
+
 fn appendPart(
     arena: std.mem.Allocator,
     body: *std.ArrayList(u8),
@@ -358,6 +406,32 @@ fn compatibilityDate(arena: std.mem.Allocator, io: std.Io) ![]const u8 {
         if (quoted.next()) |date| return date;
     }
     fail("wrangler.toml has no compatibility_date\n", .{});
+}
+
+test uploadBody {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const body = try uploadBody(arena.allocator(), "2024-11-01", "abc123", &.{ "w", "s", "g", "\x00asm" });
+    const b = "--" ++ upload_boundary;
+    try std.testing.expectEqualStrings(b ++ "\r\n" ++
+        "Content-Disposition: form-data; name=\"metadata\"\r\n" ++
+        "Content-Type: application/json\r\n\r\n" ++
+        "{\"main_module\":\"worker.js\",\"compatibility_date\":\"2024-11-01\"," ++
+        "\"bindings\":[{\"type\":\"plain_text\",\"name\":\"COMMIT\",\"text\":\"abc123\"}]," ++
+        "\"keep_bindings\":[\"secret_text\"]}\r\n" ++
+        b ++ "\r\n" ++
+        "Content-Disposition: form-data; name=\"worker.js\"; filename=\"worker.js\"\r\n" ++
+        "Content-Type: application/javascript+module\r\n\r\nw\r\n" ++
+        b ++ "\r\n" ++
+        "Content-Disposition: form-data; name=\"build/exec/site.js\"; filename=\"build/exec/site.js\"\r\n" ++
+        "Content-Type: application/javascript+module\r\n\r\ns\r\n" ++
+        b ++ "\r\n" ++
+        "Content-Disposition: form-data; name=\"build/signal/signal_wasm.js\"; filename=\"build/signal/signal_wasm.js\"\r\n" ++
+        "Content-Type: application/javascript+module\r\n\r\ng\r\n" ++
+        b ++ "\r\n" ++
+        "Content-Disposition: form-data; name=\"build/signal/signal_wasm_bg.wasm\"; filename=\"build/signal/signal_wasm_bg.wasm\"\r\n" ++
+        "Content-Type: application/wasm\r\n\r\n\x00asm\r\n" ++
+        b ++ "--\r\n", body);
 }
 
 test workerName {

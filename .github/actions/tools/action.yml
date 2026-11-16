@@ -19,7 +19,7 @@ runs:
         path: |
           /nix/store
           /nix/ci-tools
-        key: ci-tools-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'cloudflare-workers/**', 'datastar/**', 'cloudflare-workers-datastar/**', 'tools/**') }}
+        key: ci-tools-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'cloudflare-workers/**', 'datastar/**', 'cloudflare-workers-datastar/**', 'signal/**', 'signal-wasm/**', 'tools/**') }}
 
     # Cache miss only: install Nix (it wants to create /nix itself) and build.
     - if: steps.restore.outputs.cache-hit != 'true'
